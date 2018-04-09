@@ -1,2 +1,2 @@
-# ogn-gateway-asterix-
+# ogn-gateway-asterix
 OGN to ASTERIX gateway plugin
