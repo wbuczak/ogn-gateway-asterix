@@ -6,14 +6,22 @@ package org.ogn.gateway.plugin.asterix;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
+import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
 import java.net.SocketAddress;
-import java.util.HashMap;
-import java.util.Map;
+import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 import org.ogn.commons.beacon.AircraftBeacon;
+import org.ogn.commons.beacon.AircraftBeaconWithDescriptor;
 import org.ogn.commons.beacon.AircraftDescriptor;
 import org.ogn.commons.beacon.forwarder.OgnAircraftBeaconForwarder;
 import org.ogn.commons.utils.JsonUtils;
@@ -27,15 +35,30 @@ import org.slf4j.LoggerFactory;
  */
 public class AsterixForwarder implements OgnAircraftBeaconForwarder {
 
-	private static final Logger						LOG			= LoggerFactory.getLogger(AsterixForwarder.class);
+	private static final Logger	LOG		= LoggerFactory.getLogger(AsterixForwarder.class);
 
-	private static final String						VERSION		= "0.0.1";
+	private static final String	VERSION	= "0.0.1";
 
-	private DatagramSocket							socket;
-	private SocketAddress							serverAddress;
-	private DatagramPacket							datagram;
+	private List<InetAddress>	broadCastAddresses;
+	private DatagramSocket		socket;
+	private SocketAddress		serverAddress;
+	private DatagramPacket		datagram;
 
-	private final Map<String, AircraftDescriptor>	descriptors	= new HashMap<>();
+	private static class MulticastPublisher {
+		private DatagramSocket	socket;
+		private InetAddress		group;
+		private byte[]			buf;
+
+		public void multicast(String multicastMessage) throws IOException {
+			socket = new DatagramSocket();
+			group = InetAddress.getByName("230.0.0.0");
+			buf = multicastMessage.getBytes();
+
+			final DatagramPacket packet = new DatagramPacket(buf, buf.length, group, 4446);
+			socket.send(packet);
+			socket.close();
+		}
+	}
 
 	/**
 	 * default constructor
@@ -62,8 +85,12 @@ public class AsterixForwarder implements OgnAircraftBeaconForwarder {
 	@Override
 	public void init() {
 		try {
+
+			broadCastAddresses = listAllBroadcastAddresses();
+
 			socket = new DatagramSocket();
 			// serverAddress = new InetSocketAddress(InetAddress.getByName(FR24_SRV_NAME), FR24_SRV_PORT);
+
 		} catch (final Exception e) {
 			LOG.error("could not connect to FR24 server", e);
 		}
@@ -82,30 +109,34 @@ public class AsterixForwarder implements OgnAircraftBeaconForwarder {
 
 	@Override
 	public void onBeacon(AircraftBeacon beacon, Optional<AircraftDescriptor> descriptor) {
-		boolean sendDescriptor = false;
+		send(new AircraftBeaconWithDescriptor(beacon, descriptor));
+	}
 
-		if (descriptor.isPresent()) {
+	private static List<InetAddress> listAllBroadcastAddresses() throws SocketException {
+		final List<InetAddress> broadcastList = new ArrayList<>();
+		final Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+		while (interfaces.hasMoreElements()) {
+			final NetworkInterface networkInterface = interfaces.nextElement();
 
-			if (!descriptors.containsKey(descriptor.get())) {
-				descriptors.put(descriptor.get().getRegNumber(), descriptor.get());
-				sendDescriptor = true;
-			} else {
-				final AircraftDescriptor prevDescr = descriptors.get(descriptor.get().getRegNumber());
-				// send the descriptor update ONLY if it has changed
-				if (!prevDescr.equals(descriptor)) {
-					descriptors.put(descriptor.get().getRegNumber(), descriptor.get());
-					sendDescriptor = true;
-				}
+			if (networkInterface.isLoopback() || !networkInterface.isUp()) {
+				continue;
 			}
 
-		} // if
-
-		// update descriptor ONLY if needed
-		if (sendDescriptor) {
-			send(beacon, descriptor);
-		} else {
-			send(beacon, Optional.empty());
+			networkInterface.getInterfaceAddresses().stream().map(InterfaceAddress::getBroadcast)
+					.filter(Objects::nonNull).forEach(broadcastList::add);
 		}
+		return broadcastList;
+	}
+
+	private void broadcastBeacon(String broadcastMessage, InetAddress address) throws IOException {
+		// socket = new DatagramSocket();
+		socket.setBroadcast(true);
+
+		final byte[] buffer = broadcastMessage.getBytes();
+
+		final DatagramPacket packet = new DatagramPacket(buffer, buffer.length, address, 4445);
+		socket.send(packet);
+		// socket.close();
 	}
 
 	/*
@@ -115,9 +146,10 @@ public class AsterixForwarder implements OgnAircraftBeaconForwarder {
 	 * 0); }
 	 */
 
-	private void send(AircraftBeacon beacon, Optional<AircraftDescriptor> descriptor) {
+	private void send(AircraftBeaconWithDescriptor beacon) {
 
-		LOG.trace("sending beacon: {}", JsonUtils.toJson(beacon));
+		if (LOG.isTraceEnabled())
+			LOG.trace("sending beacon: {}", JsonUtils.toJson(beacon));
 
 		final ByteArrayOutputStream baos = new ByteArrayOutputStream(32);
 		final DataOutputStream dos = new DataOutputStream(baos);
